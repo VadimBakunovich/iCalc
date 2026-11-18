@@ -572,3 +572,35 @@ Object.assign(I18N.pl, {
   recipes_section: 'Przepisy',
   packs_section: 'Własne opakowania',
 });
+
+/* ---------- База ингредиентов и одно поле названия ---------- */
+Object.assign(I18N.ru, {
+  in_lang_ru: 'По-русски',
+  in_lang_pl: 'По-польски',
+  tr_none: '{lang}: перевода нет — можно добавить в «Ещё → Языки»',
+  catalog_btn: 'Выбрать из базы',
+  catalog_short: 'Из базы',
+  catalog_title: 'База ингредиентов',
+  catalog_hint: 'Отметьте всё, что используете. Фасовки и запасы можно указать потом — например, через «Инвентаризацию».',
+  catalog_add: 'Добавить',
+  catalog_added: 'Добавлено: {n}. Теперь укажите фасовки и запасы.',
+  catalog_none: 'Ничего не отмечено',
+  already_have: 'уже есть',
+  add_manually: 'Добавить вручную',
+  suggest_title: 'Из базы',
+});
+Object.assign(I18N.pl, {
+  in_lang_ru: 'Po rosyjsku',
+  in_lang_pl: 'Po polsku',
+  tr_none: '{lang}: brak tłumaczenia — można dodać w „Więcej → Języki”',
+  catalog_btn: 'Wybierz z bazy',
+  catalog_short: 'Z bazy',
+  catalog_title: 'Baza składników',
+  catalog_hint: 'Zaznacz wszystko, czego używasz. Opakowania i zapasy można podać później — np. przez „Inwentaryzację”.',
+  catalog_add: 'Dodaj',
+  catalog_added: 'Dodano: {n}. Teraz podaj opakowania i zapasy.',
+  catalog_none: 'Nic nie zaznaczono',
+  already_have: 'już jest',
+  add_manually: 'Dodaj ręcznie',
+  suggest_title: 'Z bazy',
+});

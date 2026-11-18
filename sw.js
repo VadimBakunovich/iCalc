@@ -1,11 +1,12 @@
 // Офлайн-кэш приложения.
 // ВАЖНО: при любом изменении файлов увеличьте номер версии — иначе телефон не узнает об обновлении.
-const CACHE = 'icalc-v7';
+const CACHE = 'icalc-v8';
 const ASSETS = [
   './',
   'index.html',
   'styles.css',
   'i18n.js',
+  'catalog.js',
   'app.js',
   'manifest.webmanifest',
   'icons/icon-192.png',

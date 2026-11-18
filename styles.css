@@ -378,3 +378,32 @@ input.saved { border-color: var(--ok) !important; transition: border-color 0.2s;
 .pack-custom .lang-input input { padding: 9px 10px; border-radius: 10px; }
 .tr-card { margin-bottom: 8px; }
 .tr-card .row-sub { margin: 0 0 6px; }
+
+/* v2.3: одно поле названия, база ингредиентов */
+.name-field { position: relative; }
+.name-field > input {
+  width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+  background: var(--card); font-size: 16px;
+}
+.name-tr { margin-top: 6px; line-height: 1.45; }
+.name-tr b { color: var(--text); font-weight: 600; }
+.suggest {
+  position: absolute; left: 0; right: 0; top: calc(100% - 4px); z-index: 5;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+.suggest button { display: block; width: 100%; text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); min-height: 44px; }
+.suggest button:last-child { border-bottom: 0; }
+.suggest button:active { background: var(--accent-weak); }
+.suggest b { display: block; font-weight: 600; }
+.suggest small { color: var(--muted); font-size: 13px; }
+.pack-custom input {
+  width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--card); font-size: 16px;
+}
+.cat-row .check {
+  width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; border: 2px solid var(--line); display: grid; place-items: center;
+}
+.cat-row.checked .check { background: var(--accent); border-color: var(--accent); }
+.cat-row.checked .check::after { content: ""; width: 7px; height: 12px; border: solid #fff; border-width: 0 3px 3px 0; transform: translateY(-1px) rotate(45deg); }
+.cat-row.have { opacity: 0.5; cursor: default; }
+.toolbar .chip-btn { white-space: nowrap; }

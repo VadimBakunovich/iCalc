@@ -8,7 +8,7 @@
 
 const KEY = 'icalc.v1';
 const EPS = 1e-6;
-const VERSION = '2.2';
+const VERSION = '2.3';
 // Базовые единицы ингредиента (хранятся в данных).
 const BASE_UNITS = ['г', 'мл', 'шт'];
 // Единицы, в которых можно указывать количество в рецепте.
@@ -128,6 +128,42 @@ function sameName(list, o, names) {
   const mine = new Set(LANG_CODES.map((c) => normSearch(names[c] || '')).filter(Boolean));
   return list.find((x) => x !== o && allNames(x).some((n) => mine.has(normSearch(n))));
 }
+// База ингредиентов (catalog.js) — объекты с названиями на всех языках.
+const CAT = CATALOG.map(([group, ru, pl, unit = 'г', pieceWeight = 0], k) => ({ id: 'c' + k, group, names: { ru, pl }, unit, pieceWeight }));
+// Пары для перевода: сначала база ингредиентов, затем словарь изделий (порядок языков — как в LANG_CODES).
+const PAIRS = [...CAT.map((c) => LANG_CODES.map((l) => c.names[l])), ...GLOSSARY];
+/** Язык текста по алфавиту: кириллица — русский, латиница — польский. null — если букв нет. */
+function textLang(s) {
+  if (/[Ѐ-ӿ]/.test(s)) return 'ru';
+  if (/\p{L}/u.test(s)) return 'pl';
+  return null;
+}
+/**
+ * Названия из одного поля: язык определяем по алфавиту, переводы — из базы и словаря.
+ * Если текст не изменился — переводы остаются как были; если перевода не нашлось — старый сохраняется.
+ */
+function namesFromText(text, oldNames, fallbackLang) {
+  const v = String(text || '').trim().slice(0, 100);
+  if (!v) return null;
+  const lg = textLang(v) || fallbackLang;
+  const old = oldNames || {};
+  if (old[lg] === v) return { ...old };
+  const names = { [lg]: v };
+  for (const c of LANG_CODES) {
+    if (c === lg) continue;
+    const g = guessName(v, lg, c);
+    if (g) names[c] = g;
+    else if (old[c]) names[c] = old[c];
+  }
+  return names;
+}
+/** Подпись под полем названия: какой перевод подставится. */
+function translationHint(names, shownLang) {
+  if (!names) return '';
+  return LANG_CODES.filter((c) => c !== shownLang).map((c) => names[c]
+    ? `${t('in_lang_' + c)}: <b>${esc(names[c])}</b>`
+    : `<span class="muted">${t('tr_none', { lang: t('in_lang_' + c) })}</span>`).join('<br>');
+}
 /** Перевод названия по словарю: «Сливки 30%» → «Śmietanka 30%». '' — если не знаем. */
 function guessName(text, from, to) {
   const src = String(text || '').trim();
@@ -135,7 +171,7 @@ function guessName(text, from, to) {
   const fi = LANG_CODES.indexOf(from), ti = LANG_CODES.indexOf(to);
   const n = normSearch(src);
   let best = null;
-  for (const e of GLOSSARY) {
+  for (const e of PAIRS) {
     const k = normSearch(e[fi]);
     if (n === k || (n.startsWith(k + ' ') && !/\p{L}/u.test(src.slice(e[fi].length)))) {
       if (!best || e[fi].length > best[fi].length) best = e;
@@ -718,7 +754,11 @@ function ingTags(i) {
 
 function renderIngredients() {
   if (!state.ingredients.length) {
-    return empty('🧈', t('ing_empty_title'), t('ing_empty_text'), t('ing_empty_btn'), 'new-ing');
+    return `<div class="empty"><div class="emoji">🧈</div><h2>${t('ing_empty_title')}</h2><p>${t('ing_empty_text')}</p>
+      <div class="btn-stack" style="max-width:320px;margin:0 auto">
+        <button class="btn" data-action="catalog">${t('catalog_btn')}</button>
+        <button class="btn plain" data-action="new-ing">${t('add_manually')}</button>
+      </div></div>`;
   }
   const list = [...state.ingredients].sort(byName);
   const rows = list.map((i) => invMode ? `
@@ -744,6 +784,7 @@ function renderIngredients() {
       </li>`).join('');
   return `<div class="toolbar">
       <input type="search" id="ingSearch" placeholder="${t('search')}" value="${esc(ingSearch)}" autocomplete="off">
+      ${invMode ? '' : `<button type="button" class="chip-btn" data-action="catalog">${t('catalog_short')}</button>`}
       <button type="button" class="chip-btn ${invMode ? 'on' : ''}" data-action="toggle-inv">${invMode ? t('done') : t('inventory')}</button>
     </div>
     ${invMode ? `<p class="muted small-text hint-line">${t('inventory_hint')}</p>` : ''}
@@ -756,40 +797,58 @@ function applyIngSearch() {
   $$('#view [data-name]').forEach((li) => (li.hidden = q && !li.dataset.name.includes(q)));
 }
 
-/** Поля названия на всех языках; первым — язык, выбранный для этой категории. */
-function namesFields(names, cat, phKey) {
-  const first = L(cat);
-  const order = [first, ...LANG_CODES.filter((c) => c !== first)];
-  return `<div class="field"><span>${t('name')}</span>
-    <div class="names2">${order.map((c) => `
-      <label class="lang-input"><b>${c.toUpperCase()}</b>
-        <input name="name_${c}" data-lang="${c}" value="${esc(names[c] || '')}" placeholder="${c === first ? t(phKey) : ''}" autocomplete="off"></label>`).join('')}
-    </div>
-    <div class="note">${t('names_note')}</div></div>`;
+/**
+ * Одно поле названия. Показываем название на языке категории (если его нет — на том, что есть).
+ * Перевод на другой язык подставляется сам из базы и словаря — подпись под полем показывает, какой.
+ */
+function nameField(names, cat, phKey, { suggest = false } = {}) {
+  const lg = L(cat);
+  const has = names && Object.keys(names).length;
+  const shown = has && !names[lg] ? LANG_CODES.find((c) => names[c]) : lg;
+  return `<div class="field name-field"><span>${t('name')}</span>
+    <input name="name" value="${esc((has && names[shown]) || '')}" placeholder="${esc(tL(lg, phKey))}" autocomplete="off" autocorrect="off">
+    ${suggest ? '<div class="suggest" hidden></div>' : ''}
+    <div class="note name-tr">${has ? translationHint(names, shown) : ''}</div></div>`;
 }
-/** Когда одно название введено, а другое пустое — подставляем перевод из словаря. */
-function bindAutofill(el) {
-  el.addEventListener('change', (e) => {
-    const inp = e.target;
-    if (!inp.name || !inp.name.startsWith('name_')) return;
-    for (const c of LANG_CODES) {
-      if (c === inp.dataset.lang) continue;
-      const other = $(`[name="name_${c}"]`, el);
-      if (other && !other.value.trim()) {
-        const g = guessName(inp.value, inp.dataset.lang, c);
-        if (g) { other.value = g; other.classList.add('auto'); }
-      }
-    }
+/** Живая подпись перевода под полем. Возвращает функцию, которая отдаёт итоговые названия. */
+function bindNameField(el, cat, oldNames) {
+  const inp = $('[name="name"]', el), hint = $('.name-tr', el);
+  inp.addEventListener('input', () => {
+    const n = namesFromText(inp.value, oldNames, L(cat));
+    hint.innerHTML = n ? translationHint(n, textLang(inp.value) || L(cat)) : '';
   });
-  el.addEventListener('input', (e) => e.target.classList && e.target.classList.remove('auto'));
+  return () => namesFromText(inp.value, oldNames, L(cat));
 }
-function readNamesFrom(el, max = 100) {
-  const n = {};
-  for (const c of LANG_CODES) {
-    const v = $(`[name="name_${c}"]`, el).value.trim().slice(0, max);
-    if (v) n[c] = v;
-  }
-  return n;
+/** Подсказки из базы ингредиентов при вводе названия. */
+function bindSuggest(el, exclude, onPick) {
+  const inp = $('[name="name"]', el), box = $('.suggest', el), hint = $('.name-tr', el);
+  // Пока открыты подсказки, подпись «перевода нет» не показываем — она только мешает.
+  new MutationObserver(() => (hint.hidden = !box.hidden)).observe(box, { attributes: true, attributeFilter: ['hidden'] });
+  const show = () => {
+    const q = normSearch(inp.value.trim());
+    const hits = q.length < 2 ? [] : CAT
+      .filter((c) => LANG_CODES.some((l) => normSearch(c.names[l]).includes(q)) && !sameName(state.ingredients, exclude, c.names))
+      .sort((a, b) => LANG_CODES.some((l) => normSearch(b.names[l]).startsWith(q)) - LANG_CODES.some((l) => normSearch(a.names[l]).startsWith(q)))
+      .slice(0, 6);
+    // Уже введено ровно название из базы — подсказка не нужна.
+    if (hits.some((c) => LANG_CODES.some((l) => normSearch(c.names[l]) === q))) { box.hidden = true; return; }
+    const lg = L('ingredients');
+    box.innerHTML = hits.map((c) => `<button type="button" data-cat-id="${c.id}">
+      <b>${esc(c.names[lg])}</b><small>${esc(LANG_CODES.filter((l) => l !== lg).map((l) => c.names[l]).join(' · '))} · ${U(c.unit)}</small></button>`).join('');
+    box.hidden = !hits.length;
+  };
+  inp.addEventListener('input', show);
+  inp.addEventListener('blur', () => setTimeout(() => (box.hidden = true), 200));
+  box.addEventListener('pointerdown', (e) => e.preventDefault());
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cat-id]');
+    if (!b) return;
+    const c = CAT.find((x) => x.id === b.dataset.catId);
+    inp.value = c.names[L('ingredients')];
+    box.hidden = true;
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    onPick(c);
+  });
 }
 const packTypeOptions = (sel) => PACK_TYPES.map((tp) =>
   `<option value="${tp}" ${tp === sel ? 'selected' : ''}>${esc(tL(L('packs'), 'pack_' + tp))}</option>`).join('')
@@ -799,7 +858,10 @@ function editIngredient(id, onSaved, presetName = '') {
   const i = id ? getIng(id) : null;
   const d = i ? JSON.parse(JSON.stringify(i))
     : { names: presetName ? { [L('ingredients')]: presetName } : {}, unit: 'г', stock: 0, packs: [], pieceWeight: 0, store: '', perishable: false };
-  const packs = d.packs.map((p) => ({ id: p.id, size: inVal(p.size), price: inVal(p.price), type: p.type, names: { ...p.names } }));
+  const packs = d.packs.map((p) => ({
+    id: p.id, size: inVal(p.size), price: inVal(p.price), type: p.type, names: { ...p.names },
+    text: p.names[L('packs')] || pickName(p.names, L('packs')),
+  }));
   if (!packs.length) packs.push({ id: uid(), size: '', price: '', type: 'pack', names: {} });
   const usedIn = i ? recipesUsingIng(i.id) : [];
   const stores = [...new Set(state.ingredients.map((x) => x.store).filter(Boolean))].sort(collator.compare);
@@ -807,7 +869,7 @@ function editIngredient(id, onSaved, presetName = '') {
   const el = openSheet(`
     ${sheetHead(i ? t('ing_title') : t('ing_new_title'))}
     <div class="sheet-body">
-      ${namesFields(d.names, 'ingredients', 'ing_name_ph')}
+      ${nameField(d.names, 'ingredients', 'ing_name_ph', { suggest: true })}
       <label class="field"><span>${t('unit')}</span>
         <select name="unit" ${usedIn.length ? 'disabled' : ''}>${BASE_UNITS.map((u) => `<option value="${u}" ${u === d.unit ? 'selected' : ''}>${t('unitname_' + u)}</option>`).join('')}</select>
         <div class="note">${usedIn.length ? t('unit_locked', { list: esc(usedIn.map((r) => r.name).join(', ')) }) : t('unit_note')}</div></label>
@@ -837,7 +899,7 @@ function editIngredient(id, onSaved, presetName = '') {
 
       ${i ? `<div class="btn-stack"><button type="button" class="btn danger" data-delete>${t('delete_ing')}</button></div>` : ''}
     </div>`, { guard: true });
-  bindAutofill(el);
+  const getNames = bindNameField(el, 'ingredients', i ? i.names : null);
 
   const f = (n) => $(`[name="${n}"]`, el);
   const unitNow = () => f('unit').value;
@@ -849,8 +911,8 @@ function editIngredient(id, onSaved, presetName = '') {
         <select data-f="type" aria-label="${t('pack_type')}">${packTypeOptions(p.type)}</select>
         <input data-f="price" inputmode="decimal" value="${esc(p.price)}" placeholder="0" aria-label="${t('pack_price', { cur: '' })}" autocomplete="off">
         <button type="button" class="del" data-delpack aria-label="${t('remove')}">✕</button>
-        ${p.type === 'custom' ? `<div class="pack-custom">${LANG_CODES.map((c) => `
-          <label class="lang-input"><b>${c.toUpperCase()}</b><input data-f="cn" data-lang="${c}" value="${esc(p.names[c] || '')}" placeholder="${c === L('packs') ? t('pack_custom_names') : ''}" autocomplete="off"></label>`).join('')}</div>` : ''}
+        ${p.type === 'custom' ? `<div class="pack-custom">
+          <input data-f="cn" value="${esc(p.text || '')}" placeholder="${esc(t('pack_custom_names'))}" aria-label="${esc(t('pack_custom_names'))}" autocomplete="off"></div>` : ''}
         <div class="ppu">${perUnitText(unitNow(), num(p.size), num(p.price))}</div>
       </div>`).join('');
   };
@@ -860,7 +922,7 @@ function editIngredient(id, onSaved, presetName = '') {
     if (!row) return;
     const p = packs[+row.dataset.k];
     const fld = e.target.dataset.f;
-    if (fld === 'cn') p.names[e.target.dataset.lang] = e.target.value;
+    if (fld === 'cn') p.text = e.target.value;
     else if (fld === 'size' || fld === 'price') p[fld] = e.target.value;
     $('.ppu', row).innerHTML = perUnitText(unitNow(), num(p.size), num(p.price));
   });
@@ -883,12 +945,18 @@ function editIngredient(id, onSaved, presetName = '') {
     drawPacks();
     $$('.pack-row [data-f="size"]', rowsEl).pop().focus();
   };
-  if (!i) setTimeout(() => f('name_' + L('ingredients')).focus(), 300);
+  if (!i) setTimeout(() => f('name').focus(), 300);
   f('unit').onchange = () => {
     $$('.u', el).forEach((u) => (u.textContent = U(unitNow())));
     $('.pw-field', el).hidden = unitNow() !== 'шт';
     drawPacks();
   };
+  // Выбор из базы: подставляем единицу (если её ещё можно менять) и вес штуки.
+  bindSuggest(el, i, (c) => {
+    if (!usedIn.length && unitNow() !== c.unit) { f('unit').value = c.unit; f('unit').onchange(); }
+    if (c.pieceWeight && !num(f('pieceWeight').value)) f('pieceWeight').value = inVal(c.pieceWeight);
+    el.dirty = true;
+  });
   $('[data-addpack]', el).onclick = () => {
     const ps = num(packs.find((p) => num(p.size) > 0)?.size);
     if (!(ps > 0)) return toast(t('need_pack_first'));
@@ -897,8 +965,8 @@ function editIngredient(id, onSaved, presetName = '') {
     el.dirty = true;
   };
   $('[data-save]', el).onclick = guarded(() => {
-    const names = readNamesFrom(el);
-    if (!Object.keys(names).length) { f('name_' + L('ingredients')).focus(); throw new UserError(t('name_required')); }
+    const names = getNames();
+    if (!names) { f('name').focus(); throw new UserError(t('enter_name')); }
     if (sameName(state.ingredients, i, names)) throw new UserError(t('dup_ing'));
     const unit = usedIn.length ? i.unit : unitNow();
     const outPacks = [];
@@ -906,7 +974,7 @@ function editIngredient(id, onSaved, presetName = '') {
       const p = packs[+row.dataset.k];
       const sizeEl = $('[data-f="size"]', row), priceEl = $('[data-f="price"]', row);
       const cn = {};
-      if (p.type === 'custom') for (const c of LANG_CODES) { const v = (p.names[c] || '').trim().slice(0, 40); if (v) cn[c] = v; }
+      if (p.type === 'custom') Object.assign(cn, namesFromText((p.text || '').slice(0, 40), p.names, L('packs')) || {});
       if (!sizeEl.value.trim() && !priceEl.value.trim() && !Object.keys(cn).length) return;
       if (!sizeEl.value.trim()) { sizeEl.classList.add('invalid'); sizeEl.focus(); throw new UserError(t('pack_size_required')); }
       outPacks.push(bindName({
@@ -952,6 +1020,67 @@ function editIngredient(id, onSaved, presetName = '') {
     render();
     toast(t('ing_deleted'));
   };
+}
+
+/** Массовое добавление ингредиентов из базы: отметить галочками и добавить разом. */
+function catalogPicker() {
+  const lg = L('ingredients');
+  const picked = new Set();
+  const el = openSheet(`
+    <div class="sheet-head"><button type="button" data-close>${t('cancel')}</button><h2>${t('catalog_title')}</h2>
+      <button type="button" class="primary" data-save>${t('catalog_add')}</button></div>
+    <div class="sheet-body">
+      <p class="muted small-text hint-line">${t('catalog_hint')}</p>
+      <div class="search"><input type="search" class="cat-search" placeholder="${t('search')}" autocomplete="off"></div>
+      <div class="cat-list"></div>
+    </div>`);
+  const list = $('.cat-list', el), input = $('.cat-search', el), btn = $('[data-save]', el);
+  const updBtn = () => {
+    btn.textContent = picked.size ? `${t('catalog_add')} (${picked.size})` : t('catalog_add');
+    el.dirty = picked.size > 0;
+  };
+  const draw = () => {
+    const q = normSearch(input.value.trim());
+    list.innerHTML = Object.keys(CATALOG_GROUPS).map((g) => {
+      const items = CAT.filter((c) => c.group === g && (!q || LANG_CODES.some((l) => normSearch(c.names[l]).includes(q))));
+      if (!items.length) return '';
+      return `<div class="section-title"><span>${esc(CATALOG_GROUPS[g][lang()] || CATALOG_GROUPS[g].ru)}</span></div>
+        <ul class="list">${items.map((c) => {
+          const have = !!sameName(state.ingredients, null, c.names);
+          return `<li class="row tap cat-row ${have ? 'have' : ''} ${picked.has(c.id) ? 'checked' : ''}" data-id="${c.id}">
+            <span class="check"></span>
+            <div class="row-main"><div class="row-title">${esc(c.names[lg])}</div>
+              <div class="row-sub">${esc(LANG_CODES.filter((l) => l !== lg).map((l) => c.names[l]).join(' · '))} · ${U(c.unit)}</div></div>
+            ${have ? `<span class="muted small-text">${t('already_have')}</span>` : ''}
+          </li>`;
+        }).join('')}</ul>`;
+    }).join('');
+  };
+  input.addEventListener('input', draw);
+  list.addEventListener('click', (e) => {
+    const li = e.target.closest('.cat-row');
+    if (!li || li.classList.contains('have')) return;
+    const id = li.dataset.id;
+    if (picked.has(id)) picked.delete(id); else picked.add(id);
+    li.classList.toggle('checked', picked.has(id));
+    updBtn();
+  });
+  btn.onclick = () => {
+    if (!picked.size) return toast(t('catalog_none'));
+    for (const id of picked) {
+      const c = CAT.find((x) => x.id === id);
+      if (sameName(state.ingredients, null, c.names)) continue;
+      state.ingredients.push(bindIng({
+        id: uid(), names: { ...c.names }, unit: c.unit, stock: 0, packs: [], pieceWeight: c.pieceWeight, store: '', perishable: false,
+      }));
+    }
+    save();
+    closeSheet(el);
+    render();
+    toast(t('catalog_added', { n: picked.size }));
+  };
+  draw();
+  updBtn();
 }
 
 /** Выбор ингредиента (или полуфабриката) с поиском. */
@@ -1046,7 +1175,7 @@ function editRecipe(id, copyFrom) {
   const el = openSheet(`
     ${sheetHead(r ? t('rec_title') : t('rec_new_title'))}
     <div class="sheet-body">
-      ${namesFields(d.names, 'recipes', 'rec_name_ph')}
+      ${nameField(d.names, 'recipes', 'rec_name_ph')}
       <label class="field"><span>${t('note')}</span>
         <input name="note" value="${esc(d.note)}" placeholder="${t('note_ph')}" autocomplete="off"></label>
       <label class="check-field"><input type="checkbox" name="isPrep" ${d.isPrep ? 'checked' : ''}>
@@ -1113,8 +1242,8 @@ function editRecipe(id, copyFrom) {
   });
   drawRows();
   updateCost();
-  bindAutofill(el);
-  if (!src) setTimeout(() => f('name_' + L('recipes')).focus(), 300);
+  const getNames = bindNameField(el, 'recipes', src ? d.names : null);
+  if (!src) setTimeout(() => f('name').focus(), 300);
 
   rowsEl.addEventListener('click', (e) => {
     const row = e.target.closest('.rec-row');
@@ -1139,8 +1268,8 @@ function editRecipe(id, copyFrom) {
   $('[data-addrow]', el).onclick = () => pick(null);
 
   $('[data-save]', el).onclick = guarded(() => {
-    const names = readNamesFrom(el);
-    if (!Object.keys(names).length) { f('name_' + L('recipes')).focus(); throw new UserError(t('name_required')); }
+    const names = getNames();
+    if (!names) { f('name').focus(); throw new UserError(t('enter_rec_name')); }
     if (sameName(state.recipes, r, names)) throw new UserError(t('dup_rec'));
     const yieldWeight = readNum(f('yieldWeight'));
     const baseDiameter = readNum(f('baseDiameter'));
@@ -1867,6 +1996,7 @@ document.addEventListener('click', (e) => {
     case 'new-ing': return editIngredient();
     case 'edit-ing': return editIngredient(id);
     case 'toggle-inv': invMode = !invMode; return render();
+    case 'catalog': return catalogPicker();
     case 'new-rec': return editRecipe();
     case 'edit-rec': return editRecipe(id);
     case 'goto-recipes': return setTab('recipes');
