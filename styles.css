@@ -346,3 +346,8 @@ input.saved { border-color: var(--ok) !important; transition: border-color 0.2s;
 
 .buy-edit { margin-bottom: 10px; }
 .pack-line { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 8px; font-size: 15px; }
+
+/* v2.1 */
+.sheet-wrap.closing { pointer-events: none; }
+.rec-row.problem .pick-btn, .rec-row.problem select { border-color: var(--warn); }
+.problem-note { color: var(--warn); font-size: 13px; margin: 2px 4px 6px; }

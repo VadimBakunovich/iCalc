@@ -8,11 +8,13 @@
 
 const KEY = 'icalc.v1';
 const EPS = 1e-6;
-const VERSION = '2.0';
+const VERSION = '2.1';
 // Базовые единицы ингредиента (хранятся в данных).
 const BASE_UNITS = ['г', 'мл', 'шт'];
 // Единицы, в которых можно указывать количество в рецепте.
 const ITEM_UNITS = ['г', 'кг', 'мл', 'л', 'шт', 'batch'];
+// Максимальная вложенность полуфабрикатов — одна и та же для расчёта и проверок.
+const MAX_DEPTH = 20;
 
 // ---------- helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -87,8 +89,16 @@ const byName = (a, b) => collator.compare(a.name, b.name);
 const cur = () => state.settings.currency || 'zł';
 const money = (n) => `${fmt(n)} ${esc(cur())}`;
 const toDate = (iso) => new Date(iso + 'T00:00:00');
-const fmtDate = (iso) => (iso ? dfLong.format(toDate(iso)) : '');
-const fmtDateShort = (iso) => (iso ? dfShort.format(toDate(iso)) : '');
+/** Настоящая календарная дата в формате ГГГГ-ММ-ДД (не «2024-13-40»). */
+function validDate(iso) {
+  if (typeof iso !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+  const d = toDate(iso);
+  if (isNaN(d)) return false;
+  const [y, m, day] = iso.split('-').map(Number);
+  return d.getFullYear() === y && d.getMonth() + 1 === m && d.getDate() === day;
+}
+const fmtDate = (iso) => (validDate(iso) ? dfLong.format(toDate(iso)) : '');
+const fmtDateShort = (iso) => (validDate(iso) ? dfShort.format(toDate(iso)) : '');
 
 // ---------- state ----------
 function blank() {
@@ -103,13 +113,24 @@ function sanitize(s) {
   const out = blank();
   if (!s || typeof s !== 'object') return out;
   const idOk = (x) => typeof x === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(x);
-  const idMap = new Map();
-  const fixId = (x) => {
-    if (idOk(x)) return x;
-    const k = String(x);
-    if (!idMap.has(k)) idMap.set(k, uid());
-    return idMap.get(k);
+  // Отдельные таблицы id для ингредиентов, рецептов и планов: пустые, числовые, повторяющиеся
+  // и опасные id получают новые безопасные значения, ссылки переводятся по таблице.
+  const ids = () => {
+    const map = new Map();
+    const used = new Set();
+    return {
+      def(x) {
+        const k = x == null || x === '' ? null : String(x);
+        let id = k !== null && !map.has(k) && idOk(k) ? k : uid();
+        while (used.has(id)) id = uid();
+        used.add(id);
+        if (k !== null && !map.has(k)) map.set(k, id);
+        return id;
+      },
+      ref(x) { return x == null || x === '' ? null : map.get(String(x)) || null; },
+    };
   };
+  const ingIds = ids(), recIdsMap = ids(), planIds = ids();
   const str = (x, max = 200) => (typeof x === 'string' ? x : x == null ? '' : String(x)).slice(0, max).trim();
   const pos = (x) => { const n = +x; return Number.isFinite(n) && n > 0 ? n : 0; };
 
@@ -121,12 +142,9 @@ function sanitize(s) {
     tolerance: Math.min(100, pos(st.tolerance)),
   };
 
-  const seen = new Set();
   for (const i of Array.isArray(s.ingredients) ? s.ingredients : []) {
     if (!i || typeof i !== 'object' || !str(i.name)) continue;
-    const id = fixId(i.id);
-    if (seen.has(id)) continue;
-    seen.add(id);
+    const id = ingIds.def(i.id);
     const rawPacks = Array.isArray(i.packs) ? i.packs
       : pos(i.packSize) ? [{ size: i.packSize, name: i.packName, price: i.price }] : [];
     out.ingredients.push({
@@ -147,25 +165,22 @@ function sanitize(s) {
   const rawItems = new Map();
   for (const r of Array.isArray(s.recipes) ? s.recipes : []) {
     if (!r || typeof r !== 'object' || !str(r.name)) continue;
-    const id = fixId(r.id);
-    if (seen.has(id)) continue;
-    seen.add(id);
+    const id = recIdsMap.def(r.id);
     out.recipes.push({
       id, name: str(r.name, 100), note: str(r.note, 200), isPrep: !!r.isPrep,
       yieldWeight: pos(r.yieldWeight), baseDiameter: pos(r.baseDiameter), loss: Math.min(500, pos(r.loss)), items: [],
     });
     rawItems.set(id, Array.isArray(r.items) ? r.items : []);
   }
-  const recIds = new Set(out.recipes.map((r) => r.id));
   for (const r of out.recipes) {
     for (const it of rawItems.get(r.id)) {
       if (!it || typeof it !== 'object' || !pos(it.qty)) continue;
       if (it.recId != null) {
-        const recId = fixId(it.recId);
-        if (!recIds.has(recId) || recId === r.id) continue;
+        const recId = recIdsMap.ref(it.recId);
+        if (!recId || recId === r.id) continue;
         r.items.push({ recId, qty: pos(it.qty), u: ['batch', 'г', 'кг'].includes(it.u) ? it.u : 'batch' });
       } else {
-        const ing = ingById.get(fixId(it.ingId));
+        const ing = ingById.get(ingIds.ref(it.ingId));
         if (!ing) continue;
         let u = ITEM_UNITS.includes(it.u) ? it.u : ing.unit;
         if (!Number.isFinite(toBase(ing, 1, u))) u = ing.unit;
@@ -177,7 +192,7 @@ function sanitize(s) {
   const recById = new Map(out.recipes.map((r) => [r.id, r]));
   const reaches = (from, target, depth = 0) => {
     if (from === target) return true;
-    if (depth > 20) return true;
+    if (depth > MAX_DEPTH) return true;
     const r = recById.get(from);
     return !!r && r.items.some((it) => it.recId && reaches(it.recId, target, depth + 1));
   };
@@ -190,21 +205,33 @@ function sanitize(s) {
     const items = [];
     for (const it of Array.isArray(p.items) ? p.items : []) {
       if (!it || !pos(it.count)) continue;
-      const recipeId = fixId(it.recipeId);
-      if (!recIds.has(recipeId) || items.some((x) => x.recipeId === recipeId)) continue;
+      const recipeId = recIdsMap.ref(it.recipeId);
+      if (!recipeId || items.some((x) => x.recipeId === recipeId)) continue;
       items.push({ recipeId, count: pos(it.count), diameter: pos(it.diameter) });
     }
     out.plans.push({
-      id: idOk(p.id) ? p.id : uid(),
+      id: planIds.def(p.id),
       name: str(p.name, 60),
-      date: typeof p.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(p.date) ? p.date : '',
+      date: validDate(p.date) ? p.date : '',
       items,
     });
   }
+  const active = planIds.ref(s.activePlan);
   out.activePlan = s.activePlan === 'all' && out.plans.length > 1 ? 'all'
-    : (out.plans.find((p) => p.id === s.activePlan) || sortPlans(out.plans)[0] || {}).id || null;
+    : (out.plans.find((p) => p.id === active) || sortPlans(out.plans)[0] || {}).id || null;
+
+  // Отметки «куплено» хранятся отдельно для каждого плана (и для режима «Все»).
+  const addChecks = (key, obj) => {
+    if (!key || !obj || typeof obj !== 'object') return;
+    for (const k of Object.keys(obj)) {
+      const ingId = ingIds.ref(k);
+      if (ingId && obj[k] === true) (out.checked[key] ||= {})[ingId] = true;
+    }
+  };
   if (s.checked && typeof s.checked === 'object') {
-    for (const k of Object.keys(s.checked)) if (ingById.has(k) && s.checked[k]) out.checked[k] = true;
+    const flat = Object.values(s.checked).every((v) => typeof v === 'boolean');
+    if (flat) addChecks(out.activePlan, s.checked); // формат 1.x/2.0
+    else for (const k of Object.keys(s.checked)) addChecks(k === 'all' ? 'all' : planIds.ref(k), s.checked[k]);
   }
   return out;
 }
@@ -232,6 +259,15 @@ function sortPlans(plans = state.plans) {
   return [...plans].sort((a, b) => (a.date || '9999') .localeCompare(b.date || '9999') || (a.name || '').localeCompare(b.name || ''));
 }
 const planTitle = (p) => p.name || t('plan_default');
+/** Отметки «куплено» текущего плана (или режима «Все»). */
+function checks() {
+  const key = state.activePlan || '_';
+  return (state.checked[key] ||= {});
+}
+/** Убирает ингредиент из отметок всех планов. */
+function uncheckEverywhere(ingId) {
+  Object.values(state.checked).forEach((c) => delete c[ingId]);
+}
 
 // ---------- units & calculations ----------
 function itemUnits(target) {
@@ -261,7 +297,7 @@ function subBatches(sub, qty, u) {
 }
 /** Раскладывает рецепт (с полуфабрикатами и потерями) на ингредиенты. */
 function expand(recipe, factor, acc, depth = 0) {
-  if (depth > 10 || !(factor > 0)) return acc;
+  if (depth > MAX_DEPTH || !(factor > 0)) return acc;
   const k = factor * (1 + (recipe.loss || 0) / 100);
   for (const it of recipe.items) {
     if (it.ingId) {
@@ -375,7 +411,8 @@ function bestPacks(packs, deficit) {
   const counts = ps.map(() => 0);
   for (let x = by; x > 0; x -= u[prev[x]]) counts[prev[x]]++;
   const c = mk(counts);
-  return cmp(c, best) < 0 ? c : best;
+  // Страховка от округления очень мелких фасовок: комбинация обязана закрывать нехватку.
+  return c.amount >= deficit - 1e-9 && cmp(c, best) < 0 ? c : best;
 }
 
 function currentItems() {
@@ -405,7 +442,8 @@ function calcRows(items) {
     if (deficit > EPS) {
       if (ing.packs.length) {
         const minSize = Math.min(...ing.packs.map((p) => p.size));
-        if (tol > 0 && deficit <= (minSize * tol) / 100 + EPS) small = true;
+        // Порог действует, только если дома что-то есть: без ингредиента вообще не испечь.
+        if (tol > 0 && stock > EPS && deficit <= (minSize * tol) / 100 + EPS) small = true;
         else {
           const b = bestPacks(ing.packs, deficit);
           combo = b.combo; buyAmount = b.amount; cost = b.cost;
@@ -472,6 +510,10 @@ function openSheet(html, { guard = false } = {}) {
   wrap.className = 'sheet-wrap';
   wrap.innerHTML = `<div class="backdrop"></div><div class="sheet" role="dialog" aria-modal="true">${html}</div>`;
   wrap.dirty = false;
+  // Закрывающееся окно больше не принимает нажатий (защита от двойного «Готово»).
+  wrap.addEventListener('click', (e) => {
+    if (wrap.closing) { e.stopPropagation(); e.preventDefault(); }
+  }, true);
   if (guard) {
     wrap.addEventListener('input', () => (wrap.dirty = true));
     wrap.addEventListener('change', () => (wrap.dirty = true));
@@ -486,8 +528,11 @@ function openSheet(html, { guard = false } = {}) {
   return wrap;
 }
 function closeSheet(wrap) {
+  if (wrap.closing) return;
+  wrap.closing = true;
   if (document.activeElement) document.activeElement.blur();
   wrap.classList.remove('open');
+  wrap.classList.add('closing');
   setTimeout(() => {
     wrap.remove();
     if (!$('#sheets').children.length) document.body.classList.remove('noscroll');
@@ -561,6 +606,9 @@ function render() {
   }
   $$('.tabbar button').forEach((x) => x.classList.toggle('active', x.dataset.tab === tab));
   if (tab === 'ingredients') applyIngSearch();
+  // Выбранный план всегда виден в ленте планов.
+  const chips = $('#view .chips'), act = chips && $('.chip.active', chips);
+  if (act) chips.scrollLeft = Math.max(0, act.offsetLeft - (chips.clientWidth - act.offsetWidth) / 2);
 }
 
 /* =========================================================
@@ -753,7 +801,7 @@ function editIngredient(id, onSaved, presetName = '') {
     if (!confirm(msg)) return;
     usedIn.forEach((r) => (r.items = r.items.filter((x) => x.ingId !== id)));
     state.ingredients = state.ingredients.filter((x) => x.id !== id);
-    delete state.checked[id];
+    uncheckEverywhere(id);
     save();
     closeSheet(el);
     render();
@@ -802,6 +850,14 @@ function openPicker({ parentId, onPick, withRecipes = true }) {
 /* =========================================================
    Рецепты
    ========================================================= */
+/** В составе есть позиция, которую нельзя пересчитать (и она не попадёт в расчёт). */
+function recipeHasProblem(r) {
+  return r.items.some((it) => {
+    const g = it.ingId ? getIng(it.ingId) : getRec(it.recId);
+    return g && !itemUnits(g).includes(it.u);
+  });
+}
+
 function costText(c) {
   if (c.empty || (!c.sum && c.missing)) return '';
   return `≈ ${money(c.sum)}${c.missing ? '*' : ''} ${t('per_batch')}`;
@@ -811,7 +867,8 @@ function renderRecipes() {
   if (!state.recipes.length) {
     return empty('📖', t('rec_empty_title'), t('rec_empty_text'), t('rec_empty_btn'), 'new-rec');
   }
-  const inPlan = new Map(currentItems().map((p) => [p.recipeId, p.count]));
+  const inPlan = new Map();
+  for (const p of currentItems()) inPlan.set(p.recipeId, round((inPlan.get(p.recipeId) || 0) + p.count, 2));
   const row = (r) => {
     const c = inPlan.get(r.id);
     const cost = costText(recipeCost(r));
@@ -819,6 +876,7 @@ function renderRecipes() {
       <div class="row-main">
         <div class="row-title">${esc(r.name)}</div>
         <div class="row-sub">${[t('n_ingredients', r.items.length), cost, esc(r.note)].filter(Boolean).join(' · ')}</div>
+        ${recipeHasProblem(r) ? `<div class="row-sub warn">⚠ ${t('recipe_problem')}</div>` : ''}
       </div>
       ${c ? `<span class="badge" title="${t('in_plan')}">${fmt(c)}</span>` : ''}
       <button type="button" class="chip-btn" data-action="add-to-plan" data-id="${r.id}">${t('to_plan')}</button>
@@ -876,12 +934,15 @@ function editRecipe(id, copyFrom) {
     rowsEl.innerHTML = items.length ? items.map((it, k) => {
       const g = target(it);
       const units = itemUnits(g);
-      return `<div class="rec-row" data-k="${k}">
+      // Единица, которую сейчас нельзя пересчитать (например, крем в граммах без выхода), — показываем и подсвечиваем.
+      const bad = g && it.u && !units.includes(it.u);
+      if (bad) units.push(it.u);
+      return `<div class="rec-row ${bad ? 'problem' : ''}" data-k="${k}">
         <button type="button" class="pick-btn" data-pick>${g ? (it.recId ? '🍰 ' : '') + esc(g.name) : t('choose')}</button>
         <input data-f="qty" inputmode="decimal" placeholder="0" value="${esc(it.qty)}" aria-label="${t('qty')}" autocomplete="off">
         <select data-f="u" aria-label="${t('unit')}" ${units.length > 1 ? '' : 'disabled'}>${units.map((u) => `<option value="${u}" ${u === it.u ? 'selected' : ''}>${U(u)}</option>`).join('')}</select>
         <button type="button" class="del" data-delrow aria-label="${t('remove')}">✕</button>
-      </div>`;
+      </div>${bad ? `<div class="problem-note">${t('item_unit_problem', { name: esc(g.name) })}</div>` : ''}`;
     }).join('') : `<p class="muted small-text">${t('no_items_yet')}</p>`;
   };
   const draft = () => ({
@@ -927,7 +988,7 @@ function editRecipe(id, copyFrom) {
   });
   rowsEl.addEventListener('change', (e) => {
     const row = e.target.closest('.rec-row');
-    if (row && e.target.dataset.f === 'u') { items[+row.dataset.k].u = e.target.value; updateCost(); }
+    if (row && e.target.dataset.f === 'u') { items[+row.dataset.k].u = e.target.value; drawRows(); updateCost(); }
   });
   f('loss').addEventListener('input', updateCost);
   $('[data-addrow]', el).onclick = () => pick(null);
@@ -935,6 +996,10 @@ function editRecipe(id, copyFrom) {
   $('[data-save]', el).onclick = guarded(() => {
     const name = f('name').value.trim();
     if (!name) { f('name').focus(); throw new UserError(t('enter_rec_name')); }
+    if (state.recipes.some((x) => x.id !== (r && r.id) && normSearch(x.name.trim()) === normSearch(name))) {
+      f('name').classList.add('invalid');
+      throw new UserError(t('dup_rec'));
+    }
     const yieldWeight = readNum(f('yieldWeight'));
     const baseDiameter = readNum(f('baseDiameter'));
     const loss = readNum(f('loss'), { max: 500 });
@@ -942,6 +1007,8 @@ function editRecipe(id, copyFrom) {
     $$('.rec-row', rowsEl).forEach((row) => {
       const it = items[+row.dataset.k];
       if (!it.ingId && !it.recId) return;
+      const g = target(it);
+      if (g && !itemUnits(g).includes(it.u)) throw new UserError(t('item_unit_problem', { name: g.name }));
       const q = readNum($('[data-f="qty"]', row), { required: true, positive: true });
       const key = (it.ingId || 'r:' + it.recId) + '|' + it.u;
       const prev = merged.get(key);
@@ -1043,6 +1110,23 @@ function pickRecipesForPlan() {
   };
 }
 
+/** Выбор плана из списка. */
+function choosePlan(onPick) {
+  const el = openSheet(`
+    <div class="sheet-head"><button type="button" data-close>${t('cancel')}</button><h2>${t('choose_plan_title')}</h2><span></span></div>
+    <div class="sheet-body">
+      <ul class="list">${sortPlans().map((p) => `
+        <li class="row tap" data-id="${p.id}"><div class="row-main"><div class="row-title">${esc(planTitle(p))}</div>
+          <div class="row-sub">${p.date ? fmtDate(p.date) : t('no_date')}</div></div></li>`).join('')}</ul>
+    </div>`);
+  $('.list', el).onclick = (e) => {
+    const li = e.target.closest('[data-id]');
+    if (!li) return;
+    closeSheet(el);
+    onPick(getPlan(li.dataset.id));
+  };
+}
+
 function editPlan(id) {
   const p = id ? getPlan(id) : null;
   const el = openSheet(`
@@ -1073,6 +1157,8 @@ function editPlan(id) {
   if (del) del.onclick = () => {
     if (!confirm(t('plan_delete_confirm', { name: planTitle(p) }))) return;
     state.plans = state.plans.filter((x) => x !== p);
+    delete state.checked[p.id];
+    if (state.plans.length < 2) delete state.checked.all;
     state.activePlan = (sortPlans()[0] || {}).id || null;
     save();
     closeSheet(el);
@@ -1128,6 +1214,7 @@ function renderPlan() {
         <div class="row-main">
           <div class="row-title">${r.isPrep ? '🍰 ' : ''}${esc(r.name)}</div>
           <div class="row-sub">${[esc(r.note), c.empty || (!c.sum && c.missing) ? '' : `≈ ${money(c.sum * it.count * k)}${c.missing ? '*' : ''}`].filter(Boolean).join(' · ')}</div>
+          ${recipeHasProblem(r) ? `<div class="row-sub warn">⚠ ${t('recipe_problem')}</div>` : ''}
           ${r.baseDiameter > 0 ? `<label class="dia">Ø <input data-plan-dia data-id="${r.id}" inputmode="decimal" value="${inVal(it.diameter || '')}" placeholder="${fmt(r.baseDiameter)}" autocomplete="off"> ${t('cm')}
             ${k !== 1 ? `<span class="muted">×${fmt(k)}</span>` : ''}</label>` : ''}
           <button type="button" class="link-btn" data-action="bake-one" data-id="${r.id}">✓ ${t('bake_one')}</button>
@@ -1148,7 +1235,8 @@ function renderPlan() {
   const enough = rows.filter((r) => r.deficit <= EPS);
   // Отметки «куплено» только для того, что сейчас в списке.
   const buyIds = new Set(buy.map((r) => r.ing.id));
-  for (const k of Object.keys(state.checked)) if (!buyIds.has(k)) delete state.checked[k];
+  const ch = checks();
+  for (const k of Object.keys(ch)) if (!buyIds.has(k)) delete ch[k];
   const dates = all ? earliestDates() : null;
   const total = buy.reduce((s, r) => s + r.cost, 0);
   const totalPartial = buy.some((r) => r.costPartial || (!r.cost && r.buyAmount > EPS));
@@ -1170,7 +1258,7 @@ function renderPlan() {
     for (const key of keys) {
       if (showHeads) html += `<div class="store-head">${key ? '🏪 ' + esc(key) : t('no_store')}</div>`;
       html += `<ul class="list">${groups.get(key).map((r) => {
-        const checked = !!state.checked[r.ing.id];
+        const checked = !!checks()[r.ing.id];
         const u = U(r.ing.unit);
         const date = dates && dates.get(r.ing.id);
         return `<li class="row tap buy-row ${checked ? 'checked' : ''}" data-action="toggle-check" data-id="${r.ing.id}">
@@ -1261,8 +1349,8 @@ async function shareList() {
 /** «Купила»: можно поправить, сколько и каких упаковок купила на самом деле. */
 function boughtSheet() {
   const rows = calcRows(currentItems()).filter((r) => r.buyAmount > EPS);
-  const someChecked = rows.some((r) => state.checked[r.ing.id]);
-  const list = someChecked ? rows.filter((r) => state.checked[r.ing.id]) : rows;
+  const someChecked = rows.some((r) => checks()[r.ing.id]);
+  const list = someChecked ? rows.filter((r) => checks()[r.ing.id]) : rows;
   const el = openSheet(`
     ${sheetHead(t('bought_title'))}
     <div class="sheet-body">
@@ -1291,7 +1379,7 @@ function boughtSheet() {
     });
     adds.forEach(([ing, add]) => {
       ing.stock = round(ing.stock + add);
-      delete state.checked[ing.id];
+      delete checks()[ing.id];
     });
     save();
     closeSheet(el);
@@ -1318,7 +1406,12 @@ function bakeSheet(recipeId) {
   bindSteppers(el);
   $('[data-save]', el).onclick = guarded(() => {
     const n = Math.min(it.count, readNum($('[data-count]', el), { required: true, positive: true }));
-    const short = deduct(needsFor([{ ...it, count: n }]));
+    // Списываем разницу «до» и «после», чтобы штучное (яйца) не округлялось вверх при каждой
+    // частичной выпечке: 0,5 + 0,5 бисквита на 3 яйца = 3 яйца, а не 4.
+    const before = needsFor([it]);
+    const after = needsFor([{ ...it, count: Math.max(0, it.count - n) }]);
+    const spend = new Map([...before].map(([k, v]) => [k, Math.max(0, v - (after.get(k) || 0))]));
+    const short = deduct(spend);
     it.count = round(it.count - n, 2);
     if (it.count <= EPS) p.items = p.items.filter((x) => x !== it);
     save();
@@ -1338,7 +1431,7 @@ function bakeAll() {
   if (!confirm(msg)) return;
   deduct(need);
   p.items = [];
-  state.checked = {};
+  delete state.checked[p.id];
   save();
   render();
   toast(t('baked_done'));
@@ -1517,9 +1610,14 @@ document.addEventListener('click', (e) => {
       save();
       return render();
     case 'add-to-plan': {
-      const p = addToPlan(id, 1);
-      render();
-      return toast(t('added_to_plan', { name: getRec(id).name, n: fmt(p.items.find((x) => x.recipeId === id).count), plan: planTitle(p) }));
+      const add = (target) => {
+        const p = addToPlan(id, 1, target);
+        render();
+        toast(t('added_to_plan', { name: getRec(id).name, n: fmt(p.items.find((x) => x.recipeId === id).count), plan: planTitle(p) }));
+      };
+      // В режиме «Все» спрашиваем, в какой план добавить, и не выключаем режим.
+      if (state.activePlan === 'all' && state.plans.length > 1) return choosePlan(add);
+      return add(targetPlan());
     }
     case 'plan-inc': addToPlan(id, 1, plan); return render();
     case 'plan-dec': {
@@ -1530,15 +1628,15 @@ document.addEventListener('click', (e) => {
     }
     case 'bake-one': return bakeSheet(id);
     case 'toggle-check':
-      if (state.checked[id]) delete state.checked[id]; else state.checked[id] = true;
+      { const ch = checks(); if (ch[id]) delete ch[id]; else ch[id] = true; }
       save();
-      return a.classList.toggle('checked', !!state.checked[id]);
+      return a.classList.toggle('checked', !!checks()[id]);
     case 'share-list': return shareList();
     case 'bought': return boughtSheet();
     case 'baked': return bakeAll();
     case 'clear-plan':
       if (!confirm(t('clear_plan_confirm'))) return;
-      plan.items = []; state.checked = {}; save(); return render();
+      plan.items = []; delete state.checked[plan.id]; save(); return render();
     case 'set-lang': return setLang(a.dataset.lang);
     case 'export': return exportData();
     case 'import': return importData();
