@@ -1,5 +1,6 @@
-// Офлайн-кэш приложения. При изменении файлов увеличьте номер версии.
-const CACHE = 'icalc-v3';
+// Офлайн-кэш приложения.
+// ВАЖНО: при любом изменении файлов увеличьте номер версии — иначе телефон не узнает об обновлении.
+const CACHE = 'icalc-v4';
 const ASSETS = [
   './',
   'index.html',
@@ -12,8 +13,14 @@ const ASSETS = [
   'icons/apple-touch-icon.png',
 ];
 
+// Скачиваем все файлы новой версии целиком, в обход кэша браузера,
+// чтобы не смешать старые и новые файлы.
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -24,21 +31,15 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// Сначала отдаём из кэша (работает без интернета), в фоне обновляем кэш.
+// Отдаём файлы только из кэша текущей версии — работает без интернета.
+// Новая версия приходит вместе с новым sw.js.
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
   e.respondWith(
     caches.open(CACHE).then(async (cache) => {
       const key = req.mode === 'navigate' ? 'index.html' : req;
-      const cached = await cache.match(key, { ignoreSearch: true });
-      const network = fetch(req)
-        .then((res) => {
-          if (res.ok) cache.put(key, res.clone());
-          return res;
-        })
-        .catch(() => cached);
-      return cached || network;
+      return (await cache.match(key, { ignoreSearch: true })) || fetch(req);
     })
   );
 });

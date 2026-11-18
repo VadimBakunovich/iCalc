@@ -8,7 +8,7 @@
 
 const KEY = 'icalc.v1';
 const EPS = 1e-6;
-const VERSION = '1.2';
+const VERSION = '1.3';
 // Внутренние коды единиц (хранятся в данных); подписи — из перевода.
 const UNIT_CODES = ['г', 'мл', 'шт'];
 
@@ -824,7 +824,12 @@ applyLocale();
 render();
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register('sw.js').catch(() => {});
+  // Когда установилась новая версия — перезагружаемся, если ничего не редактируется.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !$('#sheets').children.length) location.reload();
+  });
 }
 // Просим браузер не удалять данные автоматически.
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
