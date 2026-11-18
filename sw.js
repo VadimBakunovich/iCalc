@@ -1,9 +1,10 @@
 // Офлайн-кэш приложения. При изменении файлов увеличьте номер версии.
-const CACHE = 'icalc-v1';
+const CACHE = 'icalc-v3';
 const ASSETS = [
   './',
   'index.html',
   'styles.css',
+  'i18n.js',
   'app.js',
   'manifest.webmanifest',
   'icons/icon-192.png',

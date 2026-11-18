@@ -229,6 +229,10 @@ details.enough .list { border-radius: 0 0 14px 14px; }
 
 .pick-list .row { cursor: pointer; }
 
+.segmented { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; padding: 3px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line); }
+.segmented button { padding: 9px 8px; border-radius: 9px; font-weight: 600; color: var(--muted); }
+.segmented button.active { background: var(--card); color: var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
+
 /* ---------- misc ---------- */
 .card { background: var(--card); border-radius: 14px; padding: 14px; box-shadow: var(--shadow); }
 .card p { margin: 0 0 8px; }
