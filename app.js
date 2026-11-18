@@ -8,7 +8,7 @@
 
 const KEY = 'icalc.v1';
 const EPS = 1e-6;
-const VERSION = '2.1';
+const VERSION = '2.2';
 // Базовые единицы ингредиента (хранятся в данных).
 const BASE_UNITS = ['г', 'мл', 'шт'];
 // Единицы, в которых можно указывать количество в рецепте.
@@ -22,7 +22,9 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const round = (n, d = 3) => Math.round(n * 10 ** d) / 10 ** d;
-const normSearch = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е');
+// Для поиска: без регистра, «ё» = «е», польские буквы = латинские («maka» найдёт «Mąka»).
+const PL_PLAIN = { ą: 'a', ć: 'c', ę: 'e', ł: 'l', ń: 'n', ó: 'o', ś: 's', ź: 'z', ż: 'z' };
+const normSearch = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[ąćęłńóśźż]/g, (c) => PL_PLAIN[c]);
 
 /** Строгий разбор числа: «1,5», «1.5», «1 000». Всё остальное — NaN. */
 function num(v) {
@@ -67,7 +69,14 @@ function detectLang() {
   return (navigator.language || '').toLowerCase().startsWith('pl') ? 'pl' : 'ru';
 }
 let nf, collator, dfLong, dfShort;
-function lang() { return LANGS[state.settings.lang] ? state.settings.lang : 'ru'; }
+// Язык настраивается отдельно для каждой категории.
+const LANG_CATS = ['ui', 'recipes', 'ingredients', 'units', 'packs', 'share'];
+const LANG_CODES = Object.keys(LANGS);
+function L(cat) {
+  const v = state.settings.langs && state.settings.langs[cat];
+  return LANGS[v] ? v : 'ru';
+}
+function lang() { return L('ui'); }
 function applyLocale() {
   const loc = LANGS[lang()].locale;
   nf = new Intl.NumberFormat(loc, { maximumFractionDigits: 2 });
@@ -77,15 +86,63 @@ function applyLocale() {
   document.documentElement.lang = lang();
   $$('[data-i18n]').forEach((el) => (el.textContent = t(el.dataset.i18n)));
 }
-function t(key, vars) {
-  let s = I18N[lang()][key] ?? I18N.ru[key] ?? key;
+/** Перевод на заданный язык. */
+function tL(lg, key, vars) {
+  let s = I18N[lg]?.[key] ?? I18N.ru[key] ?? key;
   if (typeof s === 'function') return s(vars);
   if (vars) s = s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
   return s;
 }
-const U = (code) => t('unit_' + code);
+/** Перевод на язык интерфейса. */
+const t = (key, vars) => tL(lang(), key, vars);
+/** Единица измерения на языке единиц (или заданном). */
+const U = (code, lg = L('units')) => tL(lg, 'unit_' + code);
 const fmt = (n) => (Number.isFinite(n) ? nf.format(Math.round(n * 100) / 100) : '—');
 const byName = (a, b) => collator.compare(a.name, b.name);
+
+// ---------- двуязычные названия ----------
+/** Название на нужном языке; если перевода нет — на другом. */
+function pickName(names, lg) {
+  if (!names) return '';
+  if (names[lg]) return names[lg];
+  for (const c of LANG_CODES) if (names[c]) return names[c];
+  return '';
+}
+/** Название объекта (ингредиента, рецепта, упаковки) на заданном языке. */
+function nameIn(o, lg) {
+  if (o.type && o.type !== 'custom') return tL(lg, 'pack_' + o.type);
+  return pickName(o.names, lg);
+}
+/** Добавляет объекту вычисляемое поле name — на языке своей категории. В файл не сохраняется. */
+function bindName(o, cat) {
+  Object.defineProperty(o, 'name', { get() { return nameIn(o, L(cat)); }, enumerable: false, configurable: true });
+  return o;
+}
+const bindIng = (i) => { bindName(i, 'ingredients'); i.packs.forEach((p) => bindName(p, 'packs')); return i; };
+/** Все названия объекта — для поиска и проверки дублей. */
+const allNames = (o) => LANG_CODES.map((c) => (o.names && o.names[c]) || '').filter(Boolean);
+const searchKey = (o) => normSearch(allNames(o).join(' '));
+const missingLangs = (o) => LANG_CODES.filter((c) => !(o.names && o.names[c]));
+/** Есть ли у другого объекта такое же название на любом языке. */
+function sameName(list, o, names) {
+  const mine = new Set(LANG_CODES.map((c) => normSearch(names[c] || '')).filter(Boolean));
+  return list.find((x) => x !== o && allNames(x).some((n) => mine.has(normSearch(n))));
+}
+/** Перевод названия по словарю: «Сливки 30%» → «Śmietanka 30%». '' — если не знаем. */
+function guessName(text, from, to) {
+  const src = String(text || '').trim();
+  if (!src || from === to) return '';
+  const fi = LANG_CODES.indexOf(from), ti = LANG_CODES.indexOf(to);
+  const n = normSearch(src);
+  let best = null;
+  for (const e of GLOSSARY) {
+    const k = normSearch(e[fi]);
+    if (n === k || (n.startsWith(k + ' ') && !/\p{L}/u.test(src.slice(e[fi].length)))) {
+      if (!best || e[fi].length > best[fi].length) best = e;
+    }
+  }
+  return best ? best[ti] + src.slice(best[fi].length) : '';
+}
 const cur = () => state.settings.currency || 'zł';
 const money = (n) => `${fmt(n)} ${esc(cur())}`;
 const toDate = (iso) => new Date(iso + 'T00:00:00');
@@ -104,7 +161,7 @@ const fmtDateShort = (iso) => (validDate(iso) ? dfShort.format(toDate(iso)) : ''
 function blank() {
   return {
     v: 2, ingredients: [], recipes: [], plans: [], activePlan: null, checked: {},
-    settings: { currency: 'zł', lang: detectLang(), tolerance: 0 },
+    settings: { currency: 'zł', langs: Object.fromEntries(LANG_CATS.map((c) => [c, detectLang()])), tolerance: 0 },
   };
 }
 
@@ -136,40 +193,75 @@ function sanitize(s) {
 
   const st = s.settings && typeof s.settings === 'object' ? s.settings : {};
   const c = str(st.currency, 5);
-  out.settings = {
-    currency: !c || c === '₽' ? 'zł' : c,
-    lang: LANGS[st.lang] ? st.lang : out.settings.lang,
-    tolerance: Math.min(100, pos(st.tolerance)),
+  // До версии 2.2 был один язык на всё (settings.lang) — переносим его во все категории.
+  const oldLang = LANGS[st.lang] ? st.lang : null;
+  const langs = {};
+  for (const cat of LANG_CATS) {
+    const v = st.langs && st.langs[cat];
+    langs[cat] = LANGS[v] ? v : oldLang || out.settings.langs[cat];
+  }
+  out.settings = { currency: !c || c === '₽' ? 'zł' : c, langs, tolerance: Math.min(100, pos(st.tolerance)) };
+  // Старые названия (одно поле name) считаем написанными на тогдашнем языке интерфейса.
+  const base = oldLang || langs.ui;
+
+  /** Названия на всех языках. Старое одно название — переводим по словарю, если знаем. */
+  const readNames = (o, max) => {
+    const n = {};
+    if (o.names && typeof o.names === 'object') {
+      for (const c of LANG_CODES) { const v = str(o.names[c], max); if (v) n[c] = v; }
+    } else {
+      const v = str(o.name, max);
+      if (v) {
+        n[base] = v;
+        for (const c of LANG_CODES) if (!n[c]) { const g = guessName(v, base, c); if (g) n[c] = g; }
+      }
+    }
+    return n;
+  };
+  /** Упаковка: встроенный тип узнаём и по старому текстовому названию на любом языке. */
+  const readPack = (p) => {
+    let type = PACK_TYPES.includes(p.type) ? p.type : null;
+    let names = {};
+    if (!type) {
+      const raw = p.names && typeof p.names === 'object' ? p.names : { [base]: p.name };
+      for (const c of LANG_CODES) { const v = str(raw[c], 40); if (v) names[c] = v; }
+      const all = Object.values(names).map(normSearch);
+      type = PACK_TYPES.find((tp) => LANG_CODES.some((c) => all.includes(normSearch(tL(c, 'pack_' + tp))))) || 'custom';
+      if (type !== 'custom') names = {};
+    }
+    return { id: idOk(p.id) ? p.id : uid(), size: pos(p.size), price: pos(p.price), type, names };
   };
 
   for (const i of Array.isArray(s.ingredients) ? s.ingredients : []) {
-    if (!i || typeof i !== 'object' || !str(i.name)) continue;
+    if (!i || typeof i !== 'object') continue;
+    const names = readNames(i, 100);
+    if (!Object.keys(names).length) continue;
     const id = ingIds.def(i.id);
     const rawPacks = Array.isArray(i.packs) ? i.packs
       : pos(i.packSize) ? [{ size: i.packSize, name: i.packName, price: i.price }] : [];
-    out.ingredients.push({
+    out.ingredients.push(bindIng({
       id,
-      name: str(i.name, 100),
+      names,
       unit: BASE_UNITS.includes(i.unit) ? i.unit : 'г',
       stock: pos(i.stock),
-      packs: rawPacks.filter((p) => p && pos(p.size)).map((p) => ({
-        id: idOk(p.id) ? p.id : uid(), size: pos(p.size), name: str(p.name, 40), price: pos(p.price),
-      })),
+      packs: rawPacks.filter((p) => p && pos(p.size)).map(readPack),
       pieceWeight: pos(i.pieceWeight),
       store: str(i.store, 40),
       perishable: !!i.perishable,
-    });
+    }));
   }
   const ingById = new Map(out.ingredients.map((i) => [i.id, i]));
 
   const rawItems = new Map();
   for (const r of Array.isArray(s.recipes) ? s.recipes : []) {
-    if (!r || typeof r !== 'object' || !str(r.name)) continue;
+    if (!r || typeof r !== 'object') continue;
+    const names = readNames(r, 100);
+    if (!Object.keys(names).length) continue;
     const id = recIdsMap.def(r.id);
-    out.recipes.push({
-      id, name: str(r.name, 100), note: str(r.note, 200), isPrep: !!r.isPrep,
+    out.recipes.push(bindName({
+      id, names, note: str(r.note, 200), isPrep: !!r.isPrep,
       yieldWeight: pos(r.yieldWeight), baseDiameter: pos(r.baseDiameter), loss: Math.min(500, pos(r.loss)), items: [],
-    });
+    }, 'recipes'));
     rawItems.set(id, Array.isArray(r.items) ? r.items : []);
   }
   for (const r of out.recipes) {
@@ -485,7 +577,7 @@ function canUseSub(parentId, subId) {
   return !reaches(subId);
 }
 function packLabel(ing, p) {
-  return `${esc(p.name || t('pack_short'))} ${fmt(p.size)} ${U(ing.unit)}`;
+  return `${esc(p.name || tL(L('packs'), 'pack_short'))} ${fmt(p.size)} ${U(ing.unit)}`;
 }
 function perUnitText(unit, size, price) {
   if (!(size > 0 && price > 0)) return '';
@@ -630,7 +722,7 @@ function renderIngredients() {
   }
   const list = [...state.ingredients].sort(byName);
   const rows = list.map((i) => invMode ? `
-      <li class="row" data-name="${esc(normSearch(i.name))}">
+      <li class="row" data-name="${esc(searchKey(i))}">
         <div class="row-main">
           <div class="row-title">${esc(i.name)}</div>
           <div class="row-sub">${packsText(i)}</div>
@@ -640,7 +732,7 @@ function renderIngredients() {
           <span>${U(i.unit)}</span>
         </div>
       </li>` : `
-      <li class="row tap" data-action="edit-ing" data-id="${i.id}" data-name="${esc(normSearch(i.name))}">
+      <li class="row tap" data-action="edit-ing" data-id="${i.id}" data-name="${esc(searchKey(i))}">
         <div class="row-main">
           <div class="row-title">${esc(i.name)} ${ingTags(i)}</div>
           <div class="row-sub">${packsText(i)}</div>
@@ -664,20 +756,58 @@ function applyIngSearch() {
   $$('#view [data-name]').forEach((li) => (li.hidden = q && !li.dataset.name.includes(q)));
 }
 
+/** Поля названия на всех языках; первым — язык, выбранный для этой категории. */
+function namesFields(names, cat, phKey) {
+  const first = L(cat);
+  const order = [first, ...LANG_CODES.filter((c) => c !== first)];
+  return `<div class="field"><span>${t('name')}</span>
+    <div class="names2">${order.map((c) => `
+      <label class="lang-input"><b>${c.toUpperCase()}</b>
+        <input name="name_${c}" data-lang="${c}" value="${esc(names[c] || '')}" placeholder="${c === first ? t(phKey) : ''}" autocomplete="off"></label>`).join('')}
+    </div>
+    <div class="note">${t('names_note')}</div></div>`;
+}
+/** Когда одно название введено, а другое пустое — подставляем перевод из словаря. */
+function bindAutofill(el) {
+  el.addEventListener('change', (e) => {
+    const inp = e.target;
+    if (!inp.name || !inp.name.startsWith('name_')) return;
+    for (const c of LANG_CODES) {
+      if (c === inp.dataset.lang) continue;
+      const other = $(`[name="name_${c}"]`, el);
+      if (other && !other.value.trim()) {
+        const g = guessName(inp.value, inp.dataset.lang, c);
+        if (g) { other.value = g; other.classList.add('auto'); }
+      }
+    }
+  });
+  el.addEventListener('input', (e) => e.target.classList && e.target.classList.remove('auto'));
+}
+function readNamesFrom(el, max = 100) {
+  const n = {};
+  for (const c of LANG_CODES) {
+    const v = $(`[name="name_${c}"]`, el).value.trim().slice(0, max);
+    if (v) n[c] = v;
+  }
+  return n;
+}
+const packTypeOptions = (sel) => PACK_TYPES.map((tp) =>
+  `<option value="${tp}" ${tp === sel ? 'selected' : ''}>${esc(tL(L('packs'), 'pack_' + tp))}</option>`).join('')
+  + `<option value="custom" ${sel === 'custom' ? 'selected' : ''}>${t('pack_custom')}</option>`;
+
 function editIngredient(id, onSaved, presetName = '') {
   const i = id ? getIng(id) : null;
   const d = i ? JSON.parse(JSON.stringify(i))
-    : { name: presetName, unit: 'г', stock: 0, packs: [], pieceWeight: 0, store: '', perishable: false };
-  const packs = d.packs.map((p) => ({ id: p.id, size: inVal(p.size), name: p.name, price: inVal(p.price) }));
-  if (!packs.length) packs.push({ id: uid(), size: '', name: '', price: '' });
+    : { names: presetName ? { [L('ingredients')]: presetName } : {}, unit: 'г', stock: 0, packs: [], pieceWeight: 0, store: '', perishable: false };
+  const packs = d.packs.map((p) => ({ id: p.id, size: inVal(p.size), price: inVal(p.price), type: p.type, names: { ...p.names } }));
+  if (!packs.length) packs.push({ id: uid(), size: '', price: '', type: 'pack', names: {} });
   const usedIn = i ? recipesUsingIng(i.id) : [];
   const stores = [...new Set(state.ingredients.map((x) => x.store).filter(Boolean))].sort(collator.compare);
 
   const el = openSheet(`
     ${sheetHead(i ? t('ing_title') : t('ing_new_title'))}
     <div class="sheet-body">
-      <label class="field"><span>${t('name')}</span>
-        <input name="name" value="${esc(d.name)}" placeholder="${t('ing_name_ph')}" autocomplete="off"></label>
+      ${namesFields(d.names, 'ingredients', 'ing_name_ph')}
       <label class="field"><span>${t('unit')}</span>
         <select name="unit" ${usedIn.length ? 'disabled' : ''}>${BASE_UNITS.map((u) => `<option value="${u}" ${u === d.unit ? 'selected' : ''}>${t('unitname_' + u)}</option>`).join('')}</select>
         <div class="note">${usedIn.length ? t('unit_locked', { list: esc(usedIn.map((r) => r.name).join(', ')) }) : t('unit_note')}</div></label>
@@ -686,7 +816,7 @@ function editIngredient(id, onSaved, presetName = '') {
         <div class="note">${t('piece_weight_note')}</div></label>
 
       <div class="group-title">${t('packs_group')}</div>
-      <div class="pack-head"><span>${t('pack_size')}, <b class="u">${U(d.unit)}</b></span><span>${t('pack_name')}</span><span>${t('pack_price', { cur: esc(cur()) })}</span><span></span></div>
+      <div class="pack-head"><span>${t('pack_size')}, <b class="u">${U(d.unit)}</b></span><span>${t('pack_type')}</span><span>${t('pack_price', { cur: esc(cur()) })}</span><span></span></div>
       <div class="pack-rows"></div>
       <button type="button" class="add-row" data-addpack-row>${t('add_pack_row')}</button>
       <div class="note">${t('packs_note')}</div>
@@ -707,6 +837,7 @@ function editIngredient(id, onSaved, presetName = '') {
 
       ${i ? `<div class="btn-stack"><button type="button" class="btn danger" data-delete>${t('delete_ing')}</button></div>` : ''}
     </div>`, { guard: true });
+  bindAutofill(el);
 
   const f = (n) => $(`[name="${n}"]`, el);
   const unitNow = () => f('unit').value;
@@ -715,9 +846,11 @@ function editIngredient(id, onSaved, presetName = '') {
     rowsEl.innerHTML = packs.map((p, k) => `
       <div class="pack-row" data-k="${k}">
         <input data-f="size" inputmode="decimal" value="${esc(p.size)}" placeholder="1000" aria-label="${t('pack_size')}" autocomplete="off">
-        <input data-f="name" value="${esc(p.name)}" placeholder="${t('pack_name_ph')}" aria-label="${t('pack_name')}" autocomplete="off">
+        <select data-f="type" aria-label="${t('pack_type')}">${packTypeOptions(p.type)}</select>
         <input data-f="price" inputmode="decimal" value="${esc(p.price)}" placeholder="0" aria-label="${t('pack_price', { cur: '' })}" autocomplete="off">
         <button type="button" class="del" data-delpack aria-label="${t('remove')}">✕</button>
+        ${p.type === 'custom' ? `<div class="pack-custom">${LANG_CODES.map((c) => `
+          <label class="lang-input"><b>${c.toUpperCase()}</b><input data-f="cn" data-lang="${c}" value="${esc(p.names[c] || '')}" placeholder="${c === L('packs') ? t('pack_custom_names') : ''}" autocomplete="off"></label>`).join('')}</div>` : ''}
         <div class="ppu">${perUnitText(unitNow(), num(p.size), num(p.price))}</div>
       </div>`).join('');
   };
@@ -726,22 +859,31 @@ function editIngredient(id, onSaved, presetName = '') {
     const row = e.target.closest('.pack-row');
     if (!row) return;
     const p = packs[+row.dataset.k];
-    p[e.target.dataset.f] = e.target.value;
+    const fld = e.target.dataset.f;
+    if (fld === 'cn') p.names[e.target.dataset.lang] = e.target.value;
+    else if (fld === 'size' || fld === 'price') p[fld] = e.target.value;
     $('.ppu', row).innerHTML = perUnitText(unitNow(), num(p.size), num(p.price));
+  });
+  rowsEl.addEventListener('change', (e) => {
+    if (e.target.dataset.f !== 'type') return;
+    const p = packs[+e.target.closest('.pack-row').dataset.k];
+    p.type = e.target.value;
+    drawPacks();
+    if (p.type === 'custom') $(`.pack-row[data-k="${packs.indexOf(p)}"] [data-f="cn"]`, rowsEl).focus();
   });
   rowsEl.addEventListener('click', (e) => {
     if (!e.target.closest('[data-delpack]')) return;
     packs.splice(+e.target.closest('.pack-row').dataset.k, 1);
-    if (!packs.length) packs.push({ id: uid(), size: '', name: '', price: '' });
+    if (!packs.length) packs.push({ id: uid(), size: '', price: '', type: 'pack', names: {} });
     el.dirty = true;
     drawPacks();
   });
   $('[data-addpack-row]', el).onclick = () => {
-    packs.push({ id: uid(), size: '', name: '', price: '' });
+    packs.push({ id: uid(), size: '', price: '', type: packs[packs.length - 1]?.type || 'pack', names: {} });
     drawPacks();
-    $$('.pack-row input', rowsEl).slice(-3)[0].focus();
+    $$('.pack-row [data-f="size"]', rowsEl).pop().focus();
   };
-  if (!i) setTimeout(() => f('name').focus(), 300);
+  if (!i) setTimeout(() => f('name_' + L('ingredients')).focus(), 300);
   f('unit').onchange = () => {
     $$('.u', el).forEach((u) => (u.textContent = U(unitNow())));
     $('.pw-field', el).hidden = unitNow() !== 'шт';
@@ -755,26 +897,29 @@ function editIngredient(id, onSaved, presetName = '') {
     el.dirty = true;
   };
   $('[data-save]', el).onclick = guarded(() => {
-    const name = f('name').value.trim();
-    if (!name) { f('name').focus(); throw new UserError(t('enter_name')); }
-    const dup = state.ingredients.find((x) => x.id !== id && normSearch(x.name.trim()) === normSearch(name));
-    if (dup) throw new UserError(t('dup_ing'));
+    const names = readNamesFrom(el);
+    if (!Object.keys(names).length) { f('name_' + L('ingredients')).focus(); throw new UserError(t('name_required')); }
+    if (sameName(state.ingredients, i, names)) throw new UserError(t('dup_ing'));
     const unit = usedIn.length ? i.unit : unitNow();
     const outPacks = [];
     $$('.pack-row', rowsEl).forEach((row) => {
-      const [sizeEl, nameEl, priceEl] = $$('input', row);
-      if (!sizeEl.value.trim() && !nameEl.value.trim() && !priceEl.value.trim()) return;
+      const p = packs[+row.dataset.k];
+      const sizeEl = $('[data-f="size"]', row), priceEl = $('[data-f="price"]', row);
+      const cn = {};
+      if (p.type === 'custom') for (const c of LANG_CODES) { const v = (p.names[c] || '').trim().slice(0, 40); if (v) cn[c] = v; }
+      if (!sizeEl.value.trim() && !priceEl.value.trim() && !Object.keys(cn).length) return;
       if (!sizeEl.value.trim()) { sizeEl.classList.add('invalid'); sizeEl.focus(); throw new UserError(t('pack_size_required')); }
-      outPacks.push({
-        id: packs[+row.dataset.k].id || uid(),
+      outPacks.push(bindName({
+        id: p.id || uid(),
         size: readNum(sizeEl, { positive: true }),
-        name: nameEl.value.trim().slice(0, 40),
         price: readNum(priceEl),
-      });
+        type: p.type,
+        names: cn,
+      }, 'packs'));
     });
     const obj = {
       id: i ? i.id : uid(),
-      name: name.slice(0, 100),
+      names,
       unit,
       stock: readNum(f('stock')),
       packs: outPacks,
@@ -787,11 +932,11 @@ function editIngredient(id, onSaved, presetName = '') {
       f('pieceWeight').classList.add('invalid');
       throw new UserError(t('piece_weight_required'));
     }
-    if (i) Object.assign(i, obj); else state.ingredients.push(obj);
+    if (i) Object.assign(i, obj); else state.ingredients.push(bindIng(obj));
     save();
     closeSheet(el);
     render();
-    if (onSaved) onSaved(obj);
+    if (onSaved) onSaved(i || obj);
   });
   const del = $('[data-delete]', el);
   if (del) del.onclick = () => {
@@ -822,9 +967,9 @@ function openPicker({ parentId, onPick, withRecipes = true }) {
   const draw = () => {
     const raw = input.value.trim();
     const q = normSearch(raw);
-    const ings = [...state.ingredients].sort(byName).filter((i) => !q || normSearch(i.name).includes(q));
+    const ings = [...state.ingredients].sort(byName).filter((i) => !q || searchKey(i).includes(q));
     const recs = withRecipes
-      ? state.recipes.filter((r) => r.id !== parentId && canUseSub(parentId, r.id) && (!q || normSearch(r.name).includes(q)))
+      ? state.recipes.filter((r) => r.id !== parentId && canUseSub(parentId, r.id) && (!q || searchKey(r).includes(q)))
         .sort((a, b) => (b.isPrep - a.isPrep) || byName(a, b))
       : [];
     ul.innerHTML = `
@@ -894,15 +1039,14 @@ function renderRecipes() {
 function editRecipe(id, copyFrom) {
   const r = id ? getRec(id) : null;
   const src = r || copyFrom;
-  const d = src ? JSON.parse(JSON.stringify(src)) : { name: '', note: '', isPrep: false, yieldWeight: 0, baseDiameter: 0, loss: 0, items: [] };
-  if (copyFrom) d.name = `${src.name} ${t('copy_suffix')}`;
+  const d = src ? JSON.parse(JSON.stringify(src)) : { names: {}, note: '', isPrep: false, yieldWeight: 0, baseDiameter: 0, loss: 0, items: [] };
+  if (copyFrom) for (const c of Object.keys(d.names)) d.names[c] = `${d.names[c]} ${tL(c, 'copy_suffix')}`;
   const items = d.items.map((it) => ({ ...it, qty: inVal(it.qty) }));
 
   const el = openSheet(`
     ${sheetHead(r ? t('rec_title') : t('rec_new_title'))}
     <div class="sheet-body">
-      <label class="field"><span>${t('name')}</span>
-        <input name="name" value="${esc(d.name)}" placeholder="${t('rec_name_ph')}" autocomplete="off"></label>
+      ${namesFields(d.names, 'recipes', 'rec_name_ph')}
       <label class="field"><span>${t('note')}</span>
         <input name="note" value="${esc(d.note)}" placeholder="${t('note_ph')}" autocomplete="off"></label>
       <label class="check-field"><input type="checkbox" name="isPrep" ${d.isPrep ? 'checked' : ''}>
@@ -969,7 +1113,8 @@ function editRecipe(id, copyFrom) {
   });
   drawRows();
   updateCost();
-  if (!src) setTimeout(() => f('name').focus(), 300);
+  bindAutofill(el);
+  if (!src) setTimeout(() => f('name_' + L('recipes')).focus(), 300);
 
   rowsEl.addEventListener('click', (e) => {
     const row = e.target.closest('.rec-row');
@@ -994,12 +1139,9 @@ function editRecipe(id, copyFrom) {
   $('[data-addrow]', el).onclick = () => pick(null);
 
   $('[data-save]', el).onclick = guarded(() => {
-    const name = f('name').value.trim();
-    if (!name) { f('name').focus(); throw new UserError(t('enter_rec_name')); }
-    if (state.recipes.some((x) => x.id !== (r && r.id) && normSearch(x.name.trim()) === normSearch(name))) {
-      f('name').classList.add('invalid');
-      throw new UserError(t('dup_rec'));
-    }
+    const names = readNamesFrom(el);
+    if (!Object.keys(names).length) { f('name_' + L('recipes')).focus(); throw new UserError(t('name_required')); }
+    if (sameName(state.recipes, r, names)) throw new UserError(t('dup_rec'));
     const yieldWeight = readNum(f('yieldWeight'));
     const baseDiameter = readNum(f('baseDiameter'));
     const loss = readNum(f('loss'), { max: 500 });
@@ -1022,13 +1164,13 @@ function editRecipe(id, copyFrom) {
     }
     const obj = {
       id: r ? r.id : uid(),
-      name: name.slice(0, 100),
+      names,
       note: f('note').value.trim().slice(0, 200),
       isPrep: f('isPrep').checked,
       yieldWeight, baseDiameter, loss,
       items: [...merged.values()],
     };
-    if (r) Object.assign(r, obj); else state.recipes.push(obj);
+    if (r) Object.assign(r, obj); else state.recipes.push(bindName(obj, 'recipes'));
     save();
     closeSheet(el);
     render();
@@ -1318,21 +1460,26 @@ function shoppingText() {
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(r);
   }
+  // Весь текст — на языке «Список покупок для отправки».
+  const S = L('share');
   const keys = [...groups.keys()].sort((a, b) => (!a) - (!b) || collator.compare(a, b));
   const lines = [];
   for (const k of keys) {
-    if (keys.some(Boolean)) lines.push(`\n${k ? '🏪 ' + k : t('no_store')}`);
-    for (const r of groups.get(k)) {
-      const u = U(r.ing.unit);
+    if (keys.some(Boolean)) lines.push(`\n${k ? '🏪 ' + k : tL(S, 'no_store')}`);
+    const list = groups.get(k).sort((a, b) => collator.compare(nameIn(a.ing, S), nameIn(b.ing, S)));
+    for (const r of list) {
+      const u = U(r.ing.unit, S);
       const what = r.combo.length
-        ? r.combo.map((c) => `${c.pack.name || t('pack_short')} ${fmt(c.pack.size)} ${u} × ${c.n}`).join(' + ')
+        ? r.combo.map((c) => `${nameIn(c.pack, S) || tL(S, 'pack_short')} ${fmt(c.pack.size)} ${u} × ${c.n}`).join(' + ')
         : `${fmt(r.buyAmount)} ${u}`;
-      lines.push(`• ${r.ing.name} — ${what}`);
+      lines.push(`• ${nameIn(r.ing, S)} — ${what}`);
     }
   }
   const total = rows.reduce((s, r) => s + r.cost, 0);
-  const title = all ? t('all_plans_title') : `${planTitle(p)}${p.date ? ', ' + fmtDate(p.date) : ''}`;
-  return `${t('share_header')} (${title})\n${lines.join('\n')}${total > 0 ? `\n\n${t('purchase_total')}: ${fmt(total)} ${cur()}` : ''}`;
+  const date = p && validDate(p.date)
+    ? new Intl.DateTimeFormat(LANGS[S].locale, { weekday: 'short', day: 'numeric', month: 'long' }).format(toDate(p.date)) : '';
+  const title = all ? tL(S, 'all_plans_title') : `${p.name || tL(S, 'plan_default')}${date ? ', ' + date : ''}`;
+  return `${tL(S, 'share_header')} (${title})\n${lines.join('\n')}${total > 0 ? `\n\n${tL(S, 'purchase_total')}: ${fmt(total)} ${cur()}` : ''}`;
 }
 
 async function shareList() {
@@ -1445,10 +1592,9 @@ function renderMore() {
   return `
     <div class="section-title"><span>${t('settings')}</span></div>
     <div class="card">
-      <div class="field"><span>${t('language')}</span>
-        <div class="segmented">${Object.entries(LANGS).map(([code, l]) =>
-          `<button type="button" data-action="set-lang" data-lang="${code}" class="${code === lang() ? 'active' : ''}">${l.name}</button>`).join('')}
-        </div></div>
+      <button type="button" class="nav-row" data-action="languages">
+        <span><b>${t('languages')}</b><small>${langSummary()}</small></span><span class="chev">›</span>
+      </button>
       <label class="field"><span>${t('currency')}</span>
         <input id="currency" value="${esc(cur())}" maxlength="5" autocomplete="off"></label>
       <label class="field" style="margin:0"><span>${t('tolerance')}</span>
@@ -1482,12 +1628,132 @@ function renderMore() {
     <p class="muted small-text" style="text-align:center;margin-top:24px">${t('version', { v: VERSION })}</p>`;
 }
 
-function setLang(code) {
-  if (!LANGS[code]) return;
-  state.settings.lang = code;
-  save();
-  applyLocale();
-  render();
+/* ---------- Языки ---------- */
+/** Короткая сводка для строки «Языки»: «Русский» или «Интерфейс: Русский · Ингредиенты: Polski…». */
+function langSummary() {
+  const vals = LANG_CATS.map(L);
+  if (vals.every((v) => v === vals[0])) return LANGS[vals[0]].name;
+  return LANG_CATS.filter((c) => c === 'ui' || L(c) !== L('ui')).map((c) => `${t('lang_' + c)}: ${LANGS[L(c)].name}`).join(' · ');
+}
+/** Сколько названий без перевода на какой-нибудь язык. */
+function missingCounts() {
+  const custom = state.ingredients.flatMap((i) => i.packs.filter((p) => p.type === 'custom' && allNames(p).length));
+  return {
+    i: state.ingredients.filter((x) => missingLangs(x).length).length,
+    r: state.recipes.filter((x) => missingLangs(x).length).length,
+    p: custom.filter((x) => missingLangs(x).length).length,
+  };
+}
+/** Заполняет недостающие переводы из словаря. Возвращает, сколько названий подставлено. */
+function autoTranslate() {
+  let n = 0;
+  const fill = (o) => {
+    for (const c of missingLangs(o)) {
+      for (const from of LANG_CODES) {
+        const g = o.names[from] && guessName(o.names[from], from, c);
+        if (g) { o.names[c] = g; n++; break; }
+      }
+    }
+  };
+  state.ingredients.forEach((i) => { fill(i); i.packs.filter((p) => p.type === 'custom' && allNames(p).length).forEach(fill); });
+  state.recipes.forEach(fill);
+  return n;
+}
+
+function languagesPage() {
+  const el = openSheet('');
+  const seg = (cat, active) => `<div class="segmented">${LANG_CODES.map((c) =>
+    `<button type="button" data-cat="${cat}" data-lang="${c}" class="${c === active ? 'active' : ''}">${LANGS[c].name}</button>`).join('')}</div>`;
+  const draw = () => {
+    const vals = LANG_CATS.map(L);
+    const same = vals.every((v) => v === vals[0]) ? vals[0] : null;
+    const m = missingCounts();
+    $('.sheet', el).innerHTML = `
+      <div class="sheet-head"><span></span><h2>${t('languages')}</h2><button type="button" class="primary" data-close>${t('done')}</button></div>
+      <div class="sheet-body">
+        <div class="card"><div class="field" style="margin:0"><span>${t('lang_all')}</span>${seg('all', same)}</div></div>
+        <div class="card lang-list">${LANG_CATS.map((cat) => `
+          <div class="lang-row">
+            <div class="lang-label"><b>${t('lang_' + cat)}</b><small>${t('lang_' + cat + '_note')}</small></div>
+            ${seg(cat, L(cat))}
+          </div>`).join('')}</div>
+        <p class="muted small-text hint-line">${t('lang_fallback_note')}</p>
+        <div class="section-title"><span>${t('translations')}</span></div>
+        <div class="card">
+          <p class="small-text">${m.i || m.r || m.p ? t('translations_missing', m) : t('translations_all_done')}</p>
+          ${m.i || m.r || m.p ? `<div class="btn-stack">
+            <button type="button" class="btn secondary" data-auto>${t('translate_auto')}</button>
+            <button type="button" class="btn plain" data-translations>${t('translations_btn')}</button>
+          </div>` : ''}
+        </div>
+      </div>`;
+    $$('[data-close]', el).forEach((b) => (b.onclick = () => closeSheet(el)));
+  };
+  el.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cat]');
+    if (b) {
+      const cats = b.dataset.cat === 'all' ? LANG_CATS : [b.dataset.cat];
+      cats.forEach((c) => (state.settings.langs[c] = b.dataset.lang));
+      save();
+      applyLocale();
+      render();
+      draw();
+      return;
+    }
+    if (e.target.closest('[data-auto]')) {
+      const n = autoTranslate();
+      save();
+      render();
+      draw();
+      toast(n ? t('translate_auto_done', { n }) : t('translate_auto_none'));
+    }
+    if (e.target.closest('[data-translations]')) translationsSheet(draw);
+  });
+  draw();
+}
+
+/** Экран быстрого заполнения переводов: всё, у чего нет названия на каком-то языке. */
+function translationsSheet(onClose) {
+  const custom = [];
+  state.ingredients.forEach((i) => i.packs.forEach((p) => {
+    if (p.type === 'custom' && allNames(p).length && missingLangs(p).length) custom.push({ o: p, label: `${i.name} · ${fmt(p.size)} ${U(i.unit)}` });
+  }));
+  const groups = [
+    ['ingredients_section', state.ingredients.filter((x) => missingLangs(x).length).sort(byName).map((o) => ({ o }))],
+    ['recipes_section', state.recipes.filter((x) => missingLangs(x).length).sort(byName).map((o) => ({ o }))],
+    ['packs_section', custom],
+  ].filter(([, list]) => list.length);
+  const all = groups.flatMap(([, list]) => list.map((x) => x.o));
+  const el = openSheet(`
+    <div class="sheet-head"><span></span><h2>${t('translations')}</h2><button type="button" class="primary" data-close>${t('done')}</button></div>
+    <div class="sheet-body">
+      <p class="muted small-text hint-line">${t('translations_hint')}</p>
+      ${groups.map(([title, list]) => `
+        <div class="section-title"><span>${t(title)}</span></div>
+        ${list.map((x) => `<div class="card tr-card" data-k="${all.indexOf(x.o)}">
+          ${x.label ? `<div class="row-sub">${esc(x.label)}</div>` : ''}
+          <div class="names2">${LANG_CODES.map((c) => `
+            <label class="lang-input"><b>${c.toUpperCase()}</b>
+              <input data-lang="${c}" value="${esc(x.o.names[c] || '')}" class="${x.o.names[c] ? '' : 'missing'}" autocomplete="off"></label>`).join('')}</div>
+        </div>`).join('')}`).join('')}
+    </div>`);
+  el.addEventListener('change', (e) => {
+    const card = e.target.closest('.tr-card');
+    if (!card) return;
+    const o = all[+card.dataset.k];
+    const v = e.target.value.trim().slice(0, 100);
+    if (!v && allNames(o).filter((n) => n !== o.names[e.target.dataset.lang]).length === 0) {
+      e.target.value = o.names[e.target.dataset.lang] || '';
+      return toast(t('name_required'));
+    }
+    if (v) o.names[e.target.dataset.lang] = v; else delete o.names[e.target.dataset.lang];
+    e.target.classList.toggle('missing', !v);
+    e.target.classList.add('saved');
+    setTimeout(() => e.target.classList.remove('saved'), 800);
+    save();
+    render();
+  });
+  $$('[data-close]', el).forEach((b) => (b.onclick = () => { closeSheet(el); if (onClose) onClose(); }));
 }
 
 async function exportData() {
@@ -1520,7 +1786,7 @@ function importText(text) {
   }
   const clean = sanitize(s);
   if (!confirm(t('import_confirm', { i: clean.ingredients.length, r: clean.recipes.length, p: clean.plans.length }))) return false;
-  if (!s.settings || !s.settings.lang) clean.settings.lang = state.settings.lang;
+  if (!s.settings || (!s.settings.lang && !s.settings.langs)) clean.settings.langs = { ...state.settings.langs };
   state = clean;
   save();
   applyLocale();
@@ -1541,9 +1807,11 @@ function importData() {
 
 function loadDemo() {
   if ((state.ingredients.length || state.recipes.length) && !confirm(t('demo_confirm'))) return;
+  // Пример сразу на обоих языках; упаковки — встроенные типы.
+  const both = (get) => Object.fromEntries(LANG_CODES.map((c) => [c, get(tL(c, 'demo_data'))]));
   const D = t('demo_data');
-  const P = (size, price, k) => ({ id: uid(), size, name: D.packs[k], price });
-  const I = (k, unit, packs, stock, store, extra = {}) => ({ id: uid(), name: D[k], unit, packs, stock, store, perishable: false, pieceWeight: 0, ...extra });
+  const P = (size, price, type) => ({ id: uid(), size, price, type });
+  const I = (k, unit, packs, stock, store, extra = {}) => ({ id: uid(), names: both((d) => d[k]), unit, packs, stock, store, perishable: false, pieceWeight: 0, ...extra });
   const ings = {
     flour: I('flour', 'г', [P(1000, 4, 'bag')], 1500, 'Biedronka'),
     sugar: I('sugar', 'г', [P(1000, 4.5, 'pack')], 800, 'Biedronka'),
@@ -1556,7 +1824,7 @@ function loadDemo() {
     choc: I('choc', 'г', [P(100, 6, 'bar'), P(1000, 45, 'bag')], 0, 'Makro'),
   };
   const R = (k, extra, items) => ({
-    id: uid(), name: D[k][0], note: D[k][1], isPrep: false, yieldWeight: 0, baseDiameter: 0, loss: 0, ...extra,
+    id: uid(), names: both((d) => d[k][0]), note: D[k][1], isPrep: false, yieldWeight: 0, baseDiameter: 0, loss: 0, ...extra,
     items: items.map(([ik, qty, u]) => (ik.startsWith('@') ? { recId: recs[ik.slice(1)].id, qty, u: u || 'batch' } : { ingId: ings[ik].id, qty, u: u || ings[ik].unit })),
   });
   const recs = {};
@@ -1637,7 +1905,7 @@ document.addEventListener('click', (e) => {
     case 'clear-plan':
       if (!confirm(t('clear_plan_confirm'))) return;
       plan.items = []; delete state.checked[plan.id]; save(); return render();
-    case 'set-lang': return setLang(a.dataset.lang);
+    case 'languages': return languagesPage();
     case 'export': return exportData();
     case 'import': return importData();
     case 'demo': return loadDemo();

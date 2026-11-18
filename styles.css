@@ -351,3 +351,30 @@ input.saved { border-color: var(--ok) !important; transition: border-color 0.2s;
 .sheet-wrap.closing { pointer-events: none; }
 .rec-row.problem .pick-btn, .rec-row.problem select { border-color: var(--warn); }
 .problem-note { color: var(--warn); font-size: 13px; margin: 2px 4px 6px; }
+
+/* v2.2: языки */
+.nav-row { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; text-align: left; padding: 4px 0 14px; min-height: 44px; }
+.nav-row b { display: block; font-size: 15px; }
+.nav-row small { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.nav-row .chev { color: var(--muted); font-size: 24px; }
+.lang-list { display: grid; gap: 14px; margin-top: 10px; }
+.lang-row { display: grid; gap: 6px; }
+.lang-label b { display: block; font-size: 15px; }
+.lang-label small { color: var(--muted); font-size: 13px; }
+.names2 { display: grid; gap: 6px; }
+.lang-input { display: flex; align-items: center; gap: 8px; }
+.lang-input b { width: 26px; flex-shrink: 0; font-size: 12px; color: var(--muted); text-align: center; }
+.lang-input input {
+  flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+  background: var(--card); font-size: 16px;
+}
+.lang-input input.auto { border-color: var(--ok); }
+.lang-input input.missing { border-style: dashed; }
+.pack-row select {
+  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 11px 6px;
+  background: var(--card); font-size: 15px; -webkit-appearance: none; appearance: none;
+}
+.pack-custom { grid-column: 1 / -1; display: grid; gap: 4px; margin: 2px 0; }
+.pack-custom .lang-input input { padding: 9px 10px; border-radius: 10px; }
+.tr-card { margin-bottom: 8px; }
+.tr-card .row-sub { margin: 0 0 6px; }
